@@ -1,0 +1,240 @@
+The Azure custom script extension runs scripts on Azure virtual machines (VMs). We can use this extension for post-deployment configuration, software installation, or any other configuration or management task.
+
+In this project we will see how to use custom script extension to install and configure an IIS webserver.
+
+First of all we will provide Terraform provider information in our configuration file. For this I will create a file provider.tf in our Terraform workspace. We will write the code to use the inbuilt azurerm provider for terraform.
+
+terraform {
+  required_providers {
+    azurerm = {
+      source = "hashicorp/azurerm"
+      version = "3.10.0"
+    }
+  }
+}
+
+Next we provide configuration option for our provider. In this configuration option we will provide the subscriptio id that we are going to work with. Then we will provide the tenant id of our Azure Active directory. And we will provide details about a client with with our Terraform configuration file can authorize itself to work with our Azure account. This is because we first need to authorize ourself before we can start working with our account. In case of Terraform we actually authorize an application and not user to work with our account. 
+For this I will first create an application object in Azure Active Directory. For this we can go to Active directory blade and then there in Manage section click on App registrations. I'll click on new registration and I will give it a name Terraform. I will leave eveything else as default and then click on Register button. This will give us a TerraForm application as an application object in our Active Directory.
+Now I will go to my subscription blade and ther I will click on Access control. I will click on Add button at the top and then I will select Add role assignment. Then I will select contributor role and then click on next. Then I will select User group or service princopal. And I will click on Select members button. From right hand side I will select the application that I have registered and I will assign it contributor role.
+Now I will go back to Azure active directory and then go to Terraform app that I have registered. In the blade that appears I will click on certificates and secrets. In the blade that appears on the right hand side I will click on Add new client secret and I will add a client secret. It will then show us valude of secret. This along with other information will need to be embedded in code in provider block as shown below.
+
+provider "azurerm" {
+  subscription_id = "6912d7a0-bc28-459a-9407-33bbba641c07"
+  tenant_id = "70c0f6d9-7f3b-4425-a6b6-09b47643ec58"
+  client_id = "fb3eb97c-8679-488e-a4b4-5fd90299b7a2"
+  client_secret = "38o8Q~MsAPo59FK.Zsq0eQImB-vW2wrJznAUqc9V"
+  features {}  
+}
+
+Now in our project we will need to provide certain resources information multiple times such as resource group information, location information and virtual network information. For this terraform provides a feature called as local values with the help of which we can use the name multiple times within a module instead of repeating the expression.
+So for this I will create a file local.tf and I will declare related local values together in a single locals block:
+
+locals {
+  resource_group_name="app-grp"
+  location="Central India"
+  virtual_network={
+    name="app-network"
+    address_space="10.0.0.0/16"
+  }
+
+}
+
+Now we need to create a reosurce group for our project. For this I will first create a file main.tf. And there I will provide the resource group name and location using the local variable value specified in local.tf file.
+
+resource "azurerm_resource_group" "appgrp" {
+  name     = local.resource_group_name
+  location = local.location  
+}
+
+Now we will create a file networking.tf where we will define blocks to create virtual network, subnet, network security group to allow RDP and http port and we will define a block to associate network security group with subnet. In this blocks we will map key value pair with all the informations that we need to provide to create these resources.
+
+resource "azurerm_virtual_network" "appnetwork" {
+  name                = local.virtual_network.name
+  location            = local.location  
+  resource_group_name = local.resource_group_name
+  address_space       = [local.virtual_network.address_space]
+  depends_on = [
+    azurerm_resource_group.appgrp
+  ]  
+} 
+
+
+resource "azurerm_subnet" "subnet1" {    
+    name                 = "Subnet1"
+    resource_group_name  = local.resource_group_name
+    virtual_network_name = local.virtual_network.name
+    address_prefixes     = ["10.0.0.0/24"]
+    depends_on = [
+      azurerm_virtual_network.appnetwork
+    ]
+}
+
+resource "azurerm_network_security_group" "appnsg" {
+  name                = "app-nsg"
+  location            = local.location 
+  resource_group_name = local.resource_group_name
+
+  security_rule {
+    name                       = "AllowRDP"
+    priority                   = 300
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "3389"
+    source_address_prefix      = "*"
+    destination_address_prefix = "*"
+  }
+
+  security_rule {
+    name                       = "AllowHTTP"
+    priority                   = 400
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "80"
+    source_address_prefix      = "*"
+    destination_address_prefix = "*"
+  }
+
+depends_on = [
+    azurerm_virtual_network.appnetwork
+  ]
+}
+
+resource "azurerm_subnet_network_security_group_association" "appnsg-link" {  
+  subnet_id                 = azurerm_subnet.subnet1.id
+  network_security_group_id = azurerm_network_security_group.appnsg.id
+
+  depends_on = [
+    azurerm_virtual_network.appnetwork,
+    azurerm_network_security_group.appnsg
+  ]
+}
+
+
+Next I will create a file virtualmachines.tf where I will write block of code to create virtual machine. In this file I wil first define a block for network interface. Now the creation of this network interface depends on the creation of virtual network. If virtual network is not created before network interface then error will be returned. To make sure that this network interface id created after virtual network creation we will use the meta argument depends_on to specify dependency of network interface on virtual network creation. We will also allocate a dynamic private IP address to this network interface.
+
+resource "azurerm_network_interface" "appinterface" {  
+  name                = "appinterface"
+  location            = local.location  
+  resource_group_name = local.resource_group_name
+
+  ip_configuration {
+    name                          = "internal"
+    subnet_id                     = azurerm_subnet.subnetA.id
+    private_ip_address_allocation = "Dynamic"
+    public_ip_address_id = azurerm_public_ip.appip.id
+  }
+
+  depends_on = [
+    azurerm_virtual_network.appnetwork,
+    azurerm_public_ip.appip
+  ]
+}
+
+Next we will define a block to create a public IP address for our virtual machine.
+
+resource "azurerm_public_ip" "appip" {
+   name                = "app-ip"
+  resource_group_name = local.resource_group_name
+  location            = local.location  
+  allocation_method   = "Static"
+  depends_on = [
+    azurerm_resource_group.appgrp
+  ]
+}
+
+And then we will write the code block to create the virtual machine and we will provide all the information required in key value pair format.
+
+resource "azurerm_windows_virtual_machine" "appvm" {  
+  name                = "appvm"
+  resource_group_name = local.resource_group_name
+  location            = local.location 
+  size                = "Standard_D2s_v3"
+  admin_username      = "adminuser"
+  admin_password      = "Azure@123"
+  network_interface_ids = [
+    azurerm_network_interface.appinterface.id,
+  ]
+
+  os_disk {
+    caching              = "ReadWrite"
+    storage_account_type = "Standard_LRS"
+  }
+
+  source_image_reference {
+    publisher = "MicrosoftWindowsServer"
+    offer     = "WindowsServer"
+    sku       = "2019-Datacenter"
+    version   = "latest"
+  }
+  depends_on = [
+    azurerm_virtual_network.appnetwork,
+    azurerm_network_interface.appinterface
+  ]
+}
+
+I have a powershell script ready to install IIS webserver role and create a custom webpage in IIS directory.
+
+import-module servermanager
+add-windowsfeature web-server -includeallsubfeature
+add-windowsfeature Web-Asp-Net45
+add-windowsfeature NET-Framework-Features
+Set-Content -Path "C:\inetpub\wwwroot\Default.html" -Value "This is web server $($env:computername)"
+
+Now we need to create a storage account and isnide the storage account we need to create a container where we can host our custom script. For this I will first create a file customscript.tf.
+And in this file I will define the block azurerm_storage_account to create a storage account.
+
+resource "azurerm_storage_account" "storageacnt01" {
+  name                     = "storageacnt01"
+  resource_group_name      = "app-grp"
+  location                 = "Central India"
+  account_tier             = "Standard"
+  account_replication_type = "LRS"
+  account_kind = "StorageV2"  
+  depends_on = [
+    azurerm_resource_group.appgrp
+  ]
+}
+
+And then we will define a block to create container in this storage account.
+
+resource "azurerm_storage_container" "mydata" {
+  name                  = "mydata"
+  storage_account_name  = "storageacnt01"
+  container_access_type = "blob"
+  depends_on=[
+    azurerm_storage_account.storageacnt01
+    ]
+}
+
+Next we will write the code block to upload our custom script to isntall webserver in this container.
+
+resource "azurerm_storage_blob" "IISConfig" {
+  name                   = "IIS_Config.ps1"
+  storage_account_name   = "storageacnt01"
+  storage_container_name = "mydata"
+  type                   = "Block"
+  source                 = "IIS_Config.ps1"
+   depends_on=[azurerm_storage_container.data]
+}
+
+And then finally we will define a block to add custom script extension. Here in this code block we will include settings that will contain the information about the storage URL where our script is hosted in container and we will provide the powershell comand to execute the script as well.
+resource "azurerm_virtual_machine_extension" "vmextension" {
+  name                 = "vmextension"
+  virtual_machine_id   = azurerm_windows_virtual_machine.appvm.id
+  publisher            = "Microsoft.Compute"
+  type                 = "CustomScriptExtension"
+  type_handler_version = "1.10"
+
+  settings = <<SETTINGS
+    {
+        "fileUris": ["https://${azurerm_storage_account.storageacnt01.name}.blob.core.windows.net/data/IIS_Config.ps1"],
+          "commandToExecute": "powershell -ExecutionPolicy Unrestricted -file IIS_Config.ps1"     
+    }
+SETTINGS
+}
+
+And this compeltes our project. We can now run terraform plan and apply the configured plan.
