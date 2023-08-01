@@ -1,0 +1,225 @@
+In this project we will use Terraform to deploy the Azure Bastion host.
+
+First of all we will provide Terraform provider information in our configuration file. For this I will create a file provider.tf in our Terraform workspace. We will write the code to use the inbuilt azurerm provider for terraform.
+
+terraform {
+  required_providers {
+    azurerm = {
+      source = "hashicorp/azurerm"
+      version = "3.10.0"
+    }
+  }
+}
+
+Next we provide configuration options for our provider. In this configuration option we will provide the subscription id that we are going to work with. Then we will provide the tenant id of our Azure Active directory. And we will provide details about a client with which our Terraform configuration file can authorize itself to work with our Azure account. This is because we first need to authorize ourself before we can start working with our account. In case of Terraform we actually authorize an application and not user to work with our account. 
+For this I will first create an application object in Azure Active Directory. For this we can go to Active directory blade and then there in Manage section click on App registrations. I'll click on new registration and I will give it a name Terraform. I will leave eveything else as default and then click on Register button. This will give us a TerraForm application as an application object in our Active Directory.
+Now I will go to my subscription blade and there I will click on Access control. I will click on Add button at the top and then I will select Add role assignment. Then I will select contributor role and then click on next. Then I will select User group or service principal. And I will click on Select members button. From right hand side I will select the application that I have registered and I will assign it contributor role.
+Now I will go back to Azure active directory and then go to Terraform app that I have registered. In the blade that appears I will click on certificates and secrets. In the blade that appears on the right hand side I will click on Add new client secret and I will add a client secret. It will then show us valude of secret. This along with other information will need to be embedded in code in provider block as shown below.
+
+provider "azurerm" {
+  subscription_id = "6912d7a0-bc28-459a-9407-33bbba641c07"
+  tenant_id = "70c0f6d9-7f3b-4425-a6b6-09b47643ec58"
+  client_id = "fb3eb97c-8679-488e-a4b4-5fd90299b7a2"
+  client_secret = "38o8Q~MsAPo59FK.Zsq0eQImB-vW2wrJznAUqc9V"
+  features {}  
+}
+
+Now in our project we will need to provide certain resources information multiple times such as resource group information, location information and virtual network information. For this terraform provides a feature called as local values with the help of which we can use the name multiple times within a module instead of repeating the expression.
+So for this I will create a file local.tf and I will declare related local values together in a single locals block:
+
+locals {
+  resource_group_name="app-grp"
+  location="Central India"
+  virtual_network={
+    name="app-network"
+    address_space="10.0.0.0/16"
+  }
+
+}
+
+Now we need to create a reosurce group for our project. For this I will first create a file main.tf. And there I will provide the resource group name and location using the local variable value specified in local.tf file.
+
+resource "azurerm_resource_group" "appgrp" {
+  name     = local.resource_group_name
+  location = local.location  
+}
+
+Now I will create a variable file variable.tf to define the variable of virtual machines and subnet. In this file I will define a block number_of_subnet to specify number and conditions for number of subnets. And I will define another block number_of_machines to specify number of virtual machines.
+
+variable "number_of_subnets" {
+  type=number
+  description="This defines the number of subnets"
+  default =2
+  validation {
+    condition = var.number_of_subnets < 5
+    error_message = "The number of subnets must be less than 5."
+  }
+}
+
+variable "number_of_machines" {
+  type=number
+  description="This defines the number of virtual machines"
+  default=2
+}
+
+If at any time we want to override the default number of subnets and virtual machines specified in variables.tf then we can create a file terraform.tfvars. This is the default file name that Terraform looks for to automatically load variable values when the terraform apply command is run.
+
+number_of_subnets = 3
+number_of_machines = 1
+
+Next I will create a file networking.tf to create virtual network, subnet, network security group and attach the network security group to the subnet. In this file, I will first define a block azurerm_virtual_network to create a virtual network.
+
+resource "azurerm_virtual_network" "appnetwork" {
+  name                = local.virtual_network.name
+  location            = local.location
+  resource_group_name = local.resource_group_name
+  address_space       = [local.virtual_network.address_space]  
+  
+   depends_on = [
+     azurerm_resource_group.appgrp
+   ]
+  }
+  
+Next I will define a block to create subnets.
+
+  resource "azurerm_subnet" "subnets" {
+  count=var.number_of_subnets
+  name                 = "Subnet${count.index}"
+  resource_group_name  = local.resource_group_name
+  virtual_network_name = local.virtual_network.name
+  address_prefixes     = ["10.0.${count.index}.0/24"]
+  depends_on = [
+    azurerm_virtual_network.appnetwork
+  ]
+}
+
+Then I will define a block to create network security group.
+
+resource "azurerm_network_security_group" "appnsg" {
+  name                = "app-nsg"
+  location            = local.location
+  resource_group_name = local.resource_group_name
+
+  security_rule {
+    name                       = "AllowRDP"
+    priority                   = 300
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "3389"
+    source_address_prefix      = "*"
+    destination_address_prefix = "*"
+  }
+
+  depends_on = [
+    azurerm_resource_group.appgrp
+  ]
+}
+
+And finally I will define a block to associate network security group with subnet.
+
+resource "azurerm_subnet_network_security_group_association" "appnsglink" {
+  count=var.number_of_subnets
+  subnet_id                 = azurerm_subnet.subnets[count.index].id
+  network_security_group_id = azurerm_network_security_group.appnsg.id
+  depends_on = [
+    azurerm_virtual_network.appnetwork,
+    azurerm_network_security_group.appnsg
+  ]
+}
+
+Next I will create a file virtualmachines.tf where I will write block of code to create virtual machine. In this file I will first define a block for network interface. I will use the count object as meta argument to dynamically define the name of network interface based on the number of virtual machines using the index number. This can be achieved using interpolation technique in terraform. Also the virtual machine that will be created will not have public IP address. So I will specify this ip configuration. The subnet id will be assigned dynamically using the subnet name in variables.tf with count object and index number. Now the creation of this network interface depends on the creation of subnet. If subnet is not created before network interface then error will be returned. To make sure that this network interface id is created after subnet creation we will use the meta argument depends_on to specify dependency of network interface on subnet creation.
+
+resource "azurerm_network_interface" "appinterface" {
+  count=var.number_of_machines
+  name                = "appinterface${count.index}"
+  location            = local.location
+  resource_group_name = local.resource_group_name
+
+  ip_configuration {
+    name                          = "internal"
+    subnet_id                     = azurerm_subnet.subnets[count.index].id
+    private_ip_address_allocation = "Dynamic"    
+  }
+  depends_on = [
+    azurerm_subnet.subnets
+  ]
+}
+
+Now define a block azurerm_windows_virtual_machine where we will write code to provide information for virtual machine creation.
+resource "azurerm_windows_virtual_machine" "appvm" {
+  count=var.number_of_machines
+  name                = "appvm${count.index}"
+  resource_group_name = local.resource_group_name
+  location            = local.location
+  size                = "Standard_D2S_v3"
+  admin_username      = "adminuser"
+  admin_password      = "AzureUser@123"
+  network_interface_ids = [
+    azurerm_network_interface.appinterface[count.index].id,
+  ]
+
+  os_disk {
+    caching              = "ReadWrite"
+    storage_account_type = "Standard_LRS"
+  }
+
+  source_image_reference {
+    publisher = "MicrosoftWindowsServer"
+    offer     = "WindowsServer"
+    sku       = "2019-Datacenter"
+    version   = "latest"
+  }
+  depends_on = [
+    azurerm_network_interface.appinterface,
+    azurerm_resource_group.appgrp
+  ]
+}
+
+And now finally we need to create a subnet with name AzureBastionSubnet. And we will create a bastion host in this subnet. for this we will create a file bastion.tf. In this file I will first define a block azurerm_subnet to create a subnet AzureBastionSubnet for our bastion host.
+
+resource "azurerm_subnet" "bastionsubnet" {  
+  name                 = "AzureBastionSubnet"
+  resource_group_name  = local.resource_group_name
+  virtual_network_name = local.virtual_network.name
+  address_prefixes     = ["10.0.10.0/24"]
+  depends_on = [
+    azurerm_virtual_network.appnetwork
+  ]
+}
+
+Next we will define a block azurerm_public_ip with required information to create a public IP address for our bastion host.
+
+resource "azurerm_public_ip" "bastionip" {  
+  name                = "bastion-ip"
+  resource_group_name = local.resource_group_name
+  location            = local.location
+  allocation_method   = "Static" 
+  sku = "Standard" 
+ depends_on = [
+   azurerm_resource_group.appgrp
+ ]
+}
+
+And finally we will define a block azurerm_bastion_host to create our azure bastion host. Here we will provide the name of our bastion host. We will take location and resource group name from our local variable file. Inside it we will define an ip configuration block to provide subnet and public IP address information for azure bastion host.
+
+
+resource "azurerm_bastion_host" "appbastion" {
+  name                = "appbastion"
+  location            = local.location
+  resource_group_name = local.resource_group_name
+
+  ip_configuration {
+    name                 = "configuration"
+    subnet_id            = azurerm_subnet.bastionsubnet.id
+    public_ip_address_id = azurerm_public_ip.bastionip.id
+  }
+}
+
+Now i will run terraform validate to validate the configuration.
+terraform validate
+Then I will create a plan.
+terraform plan -out main.tfplan
+once the plan is in place I will go ahead and apply the plan.
+terraform apply main.tfplan
