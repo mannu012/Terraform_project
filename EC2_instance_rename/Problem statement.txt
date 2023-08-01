@@ -1,0 +1,1 @@
+Destroy the previous deployment. Create 2 EC2 instances in Ohio and N.Virginia respectively. Rename Ohio’s instance to ‘ohio-box’ and Virginia’s instance to ‘virginia-box'
