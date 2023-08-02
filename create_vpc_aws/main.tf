@@ -1,6 +1,6 @@
 provider "aws" {
-    access_key = "AKIASJ2YKAR4DL3NNPHW"
-    secret_key = "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"
+    access_key = "XXXXXXXXXXX"
+    secret_key = "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
     region = "us-east-1"
 }
 # Create a VPC
